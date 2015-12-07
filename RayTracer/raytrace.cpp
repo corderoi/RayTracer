@@ -31,6 +31,8 @@ const string DefaultOutputFileName = "output.ppm";
 
 /**
  * Converts any object with the << operator to string
+ * @param obj T the object to convert
+ * @return string representation of obj
  */
 template <typename T>
 string toString(T obj) {
@@ -58,7 +60,9 @@ public:
 };
 
 /**
- * Returns true if 'text' is empty or only white space
+ * Checks if a string is only white space
+ * @param text The string to check
+ * @return true if 'text' is empty or only white space, false otherwise
  */
 bool isWhiteSpace(const string& text) {
     for (int i = 0; i < text.length(); i++) {
@@ -181,7 +185,7 @@ struct Descriptor {
     /**
      * Parses a string to determine its corresponding descriptor.
      * @arg text: string The string to examine
-     * @return Descriptor The corresponding descriptor ID
+     * @return ID The corresponding descriptor ID
      * @throws RuntimeException if the string is unrecognized
      */
     static ID parse(const string& text) {
@@ -203,6 +207,9 @@ void parseLine(const vector<string>& vs)
     const Descriptor::ID d = Descriptor::parse(vs[0]);
     
     // Handle each possible descriptor case
+    // Set the corresponding variables to parsed values. It is assumed that all
+    // required values will be specified (besides the optional and multiple potential
+    // number of lights/spheres), otherwise behavior is undefined
     switch (d) {
         case Descriptor::NEAR:
             g_near = toFloat(vs[1]);
@@ -226,6 +233,7 @@ void parseLine(const vector<string>& vs)
             break;
         case Descriptor::SPHERE:
         {
+            // Push a new sphere onto 'spheres'
             const string name = vs[1];
             const vec4 pos = toVec4(vs[2], vs[3], vs[4]);
             const vec3 scale = vec3(toFloat(vs[5]), toFloat(vs[6]), toFloat(vs[7]));
@@ -243,6 +251,7 @@ void parseLine(const vector<string>& vs)
             break;
         case Descriptor::LIGHT:
         {
+            // Push a new light onto 'lights'
             const string name = vs[1];
             const vec4 pos = toVec4(vs[2], vs[3], vs[4]);
             const vec4 color = toVec4(vs[5], vs[6], vs[7]);
@@ -314,6 +323,7 @@ static float calculateDiscriminant(float A, float B, float C) {
 
 /**
  * Solves the quadratic equation.
+ * @return vector containing the root(s), if any
  */
 static vector<float> quadratic(float A, float B, float C) {
     vector<float> roots;
@@ -334,10 +344,12 @@ static vector<float> quadratic(float A, float B, float C) {
 
 /**
  * Purges roots not corresponding to valid intersections for ray tracing, such as roots of 0 or less.
+ * @param roots The roots to check
+ * @return vector containing roots that correspond to valid intersections
  */
 static vector<float> purgeRoots(const vector<float>& roots) {
     vector<float> newRoots;
-    const float IntersectionThreshold = 0.001; // don't let objects cast a shadow on themselves
+    const float IntersectionThreshold = 0.0001; // don't let objects cast a shadow on themselves
     for (int i = 0; i < roots.size(); i++) {
         const float root = roots[i];
         if (root > IntersectionThreshold) {
@@ -415,6 +427,9 @@ static float calculateDistance(const vec4& p1, const vec4& p2) {
 
 /**
  * Calculates the reflection ray for a given incident ray and reflection point/normal.
+ * @param incident Ray representing the ray to reflect
+ * @param normal Ray representing the surface to reflect against
+ * @return Ray representing the reflection ray from the surface
  */
 static Ray reflect(const Ray& incident, const Ray& normal) {
     const vec4 Ri = incident.dir,
@@ -428,6 +443,10 @@ static Ray reflect(const Ray& incident, const Ray& normal) {
 
 /**
  * Determines if the shadow ray is blocked by any spheres with regards to the light.
+ * @param shadowRay The shadow ray
+ * @param light The light of interest
+ * @param spheres The spheres of interest
+ * @return true if any spheres block the shadowRay, false otherwise
  */
 static bool shadowRayBlocked(const Ray& shadowRay, const Light& light, const vector<Sphere>& spheres) {
     for (int i = 0; i < spheres.size(); i++) {
@@ -441,6 +460,10 @@ static bool shadowRayBlocked(const Ray& shadowRay, const Light& light, const vec
 
 /**
  * Traces a ray through the scene and computes the color corresponding to the ray.
+ * @param ray The ray to trace
+ * @param reflectionDepth How many times this ray has been reflected. 0 represents
+ * initial camera rays (rays starting from the camera)
+ * @return vec4 representing the color that this ray maps to
  */
 static vec4 trace(const Ray& ray, int reflectionDepth)
 {
@@ -460,17 +483,17 @@ static vec4 trace(const Ray& ray, int reflectionDepth)
         vector<Ray> intersections;
         if (intersect(*sphere, ray, intersections)) {
             for (int j = 0; j < intersections.size(); j++) {
-                const Ray intersection = intersections[j];
+                const Ray* intersection = &intersections[j];
                 
                 // Calculate distance of intersection point
-                const float distance = calculateDistance(ray.origin, intersection.origin);
+                const float distance = calculateDistance(ray.origin, intersection->origin);
                 
                 if (distance < minimumDistance) {
                     // If this is an initial camera ray, cut off any intersection points before the image plane
-                    const bool cutOffByImagePlane = (reflectionDepth == 0 && fabs(intersection.origin.z) < g_near);
+                    const bool cutOffByImagePlane = (reflectionDepth == 0 && fabs(intersection->origin.z) < g_near);
                     
                     if (!cutOffByImagePlane) {
-                        closestIntersection = intersection;
+                        closestIntersection = *intersection;
                         minimumDistance = distance;
                         intersectionSphere = const_cast<Sphere*>(sphere);
                     }
@@ -507,10 +530,12 @@ static vec4 trace(const Ray& ray, int reflectionDepth)
                 continue;
             }
             const vec4 diffuseIllumination = intersectionSphere->Kd * light->color * diffuseContribution * intersectionSphere->color;
-            const vec4 specularIllumination = (insideSphere) ? vec4() : intersectionSphere->Ks * light->color * pow(dot(R, V), intersectionSphere->n);
-                // if inside sphere, omit specular illumination
+            lightIllumination += diffuseIllumination;
             
-            lightIllumination += diffuseIllumination + specularIllumination;
+            if (!insideSphere) { // only consider specular illumination for outer surface
+                const vec4 specularIllumination =  intersectionSphere->Ks * light->color * pow(dot(R, V), intersectionSphere->n);
+                lightIllumination += specularIllumination;
+            }
         }
     }
     
