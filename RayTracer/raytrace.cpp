@@ -75,7 +75,7 @@ bool isWhiteSpace(const string& text) {
  */
 class Debug {
 public:
-    #define Debug_ENABLED__ true
+    #define Debug_ENABLED__ false
 
     static void assertC(bool condition) {
         #if Debug_ENABLED__
@@ -297,9 +297,6 @@ void loadFile(const char* filename)
 
 void setColor(int ix, int iy, const vec4& color)
 {
-    // DEBUG
-    //cerr << "setColor(" << ix << ", " << iy << "): " << color << endl;
-    
     int iy2 = g_height - iy - 1; // Invert iy coordinate.
     g_colors[iy2 * g_width + ix] = color;
 }
@@ -338,9 +335,9 @@ static vector<float> quadratic(float A, float B, float C) {
 /**
  * Purges roots not corresponding to valid intersections for ray tracing, such as roots of 0 or less.
  */
-static vector<float> purgeRoots(const vector<float>& roots, int reflectionDepth) {
+static vector<float> purgeRoots(const vector<float>& roots) {
     vector<float> newRoots;
-    const float IntersectionThreshold = (reflectionDepth != 0) ? 0.001 : g_near; // account for the near plane for initial camera rays
+    const float IntersectionThreshold = 0.001; // don't let objects cast a shadow on themselves
     for (int i = 0; i < roots.size(); i++) {
         const float root = roots[i];
         if (root > IntersectionThreshold) {
@@ -354,12 +351,12 @@ static vector<float> purgeRoots(const vector<float>& roots, int reflectionDepth)
  * Checks for intersection of 'sphere' and 'ray'.
  * @param sphere The sphere of interest with regards to intersection
  * @param ray The ray we are checking intersection for
- * @param intersection A ray to set the point and normal of intersection to, if
- * and only if there is an intersection
- * @return true if ray intersects sphere and sets intersection to the point and
- * normal of intersection, false otherwise.
+ * @param intersections Rays to potentially set the point and normal of intersection 
+ * to, if and only if there is an intersection
+ * @return true if ray intersects sphere and sets intersections to the point(s) and
+ * normal(s) of intersection, false otherwise.
  */
-bool intersect(const Sphere& sphere, const Ray& ray, Ray& intersection, int reflectionDepth) {
+bool intersect(const Sphere& sphere, const Ray& ray, vector<Ray>& intersections) {
     const vec4 offsetPos = sphere.pos - ray.origin;
     const mat4 scale = Scale(sphere.scale);
     mat4 invertedScale;
@@ -371,32 +368,35 @@ bool intersect(const Sphere& sphere, const Ray& ray, Ray& intersection, int refl
         B = dot(scaledRay.origin, scaledRay.dir),
         C = dot(scaledRay.origin, scaledRay.origin) - 1.0;
     
-    vector<float> roots = purgeRoots(quadratic(A, B, C), reflectionDepth);
+    vector<float> roots = purgeRoots(quadratic(A, B, C));
     
-    if (roots.size() > 0) {
-        // Extract root corresponding to nearest point
-        const float root = (roots.size() == 2) ? min(roots[0], roots[1]) : roots[0]; // for double roots, smaller root is only one of interest
+    if (roots.size() == 0) { // no real roots of interest
+        return false;
+    }
+    sort(roots.begin(), roots.end()); // guarantee to caller that intersections will be ordered by distance
+    
+    for (int i = 0; i < roots.size(); i++) {
+        const float root = roots[i];
         
         // Calculate point of intersection
         const vec4 pointOfIntersection = ray.origin + root * ray.dir;
-        intersection.origin = pointOfIntersection;
         
         // Calculate normal at point of intersection
         vec4 scaledNormal = pointOfIntersection - sphere.pos;
         InvertMatrix(Scale(sphere.scale), invertedScale);
         const vec4 normalAtIntersection = normalize(2.0 * invertedScale * invertedScale * scaledNormal);
-        intersection.dir = normalAtIntersection;
+
+        const Ray intersection = { pointOfIntersection, normalAtIntersection };
         
-        return true;
-    } else {
-        return false;
+        intersections.push_back(intersection);
     }
+    
+    return true;
 }
 
 bool intersect(const Sphere& sphere, const Ray& ray) { // if we only care about whether an intersection happens or not (i.e. shadow ray)
-    Ray intersection;
-    const int DontCare = -1;
-    return intersect(sphere, ray, intersection, DontCare);
+    vector<Ray> dontCare;
+    return intersect(sphere, ray, dontCare);
 }
 
 // -------------------------------------------------------------------
@@ -457,13 +457,24 @@ static vec4 trace(const Ray& ray, int reflectionDepth)
     for (int i = 0; i < spheres.size(); i++) {
         const Sphere* sphere = &spheres[i];
         
-        Ray intersection;
-        if (intersect(*sphere, ray, intersection, reflectionDepth)) {
-            float distance = calculateDistance(ray.origin, intersection.origin);
-            if (distance < minimumDistance) {
-                closestIntersection = intersection;
-                minimumDistance = distance;
-                intersectionSphere = const_cast<Sphere*>(sphere);
+        vector<Ray> intersections;
+        if (intersect(*sphere, ray, intersections)) {
+            for (int j = 0; j < intersections.size(); j++) {
+                const Ray intersection = intersections[j];
+                
+                // Calculate distance of intersection point
+                const float distance = calculateDistance(ray.origin, intersection.origin);
+                
+                if (distance < minimumDistance) {
+                    // If this is an initial camera ray, cut off any intersection points before the image plane
+                    const bool cutOffByImagePlane = (reflectionDepth == 0 && fabs(intersection.origin.z) < g_near);
+                    
+                    if (!cutOffByImagePlane) {
+                        closestIntersection = intersection;
+                        minimumDistance = distance;
+                        intersectionSphere = const_cast<Sphere*>(sphere);
+                    }
+                }
             }
         }
     }
@@ -480,6 +491,8 @@ static vec4 trace(const Ray& ray, int reflectionDepth)
     // clocal = sum(shadowRays(P, Light))
     vec4 lightIllumination;
     
+    const bool insideSphere = (dot(ray.dir, closestIntersection.dir) > 0.0);
+
     const vec4 V = normalize(ray.origin - closestIntersection.origin);
     
     for (int i = 0; i < lights.size(); i++) {
@@ -494,7 +507,9 @@ static vec4 trace(const Ray& ray, int reflectionDepth)
                 continue;
             }
             const vec4 diffuseIllumination = intersectionSphere->Kd * light->color * diffuseContribution * intersectionSphere->color;
-            const vec4 specularIllumination = intersectionSphere->Ks * light->color * pow(dot(R, V), intersectionSphere->n);
+            const vec4 specularIllumination = (insideSphere) ? vec4() : intersectionSphere->Ks * light->color * pow(dot(R, V), intersectionSphere->n);
+                // if inside sphere, omit specular illumination
+            
             lightIllumination += diffuseIllumination + specularIllumination;
         }
     }
@@ -507,6 +522,7 @@ static vec4 trace(const Ray& ray, int reflectionDepth)
     const vec4 reflectionContribution = trace(reflection, reflectionDepth + 1);
     
     if (!(reflectionContribution.x == bgColor.x && reflectionContribution.y == bgColor.y && reflectionContribution.z == bgColor.z)) {
+            // omit contribution of reflection if it only produces the background color
         reflectionIllumination = intersectionSphere->Kr * reflectionContribution;
     }
     
